@@ -21,7 +21,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, HairParams
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -40,15 +40,292 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
+def compute_hair_losses(gaussians, hair_params):
+    """
+    Compute all hair-specific regularization losses.
+    
+    Args:
+        gaussians: GaussianModel instance
+        hair_params: HairParams instance with loss weights
+        
+    Returns:
+        dict: Dictionary containing individual loss components
+    """
+    losses = {
+        'opacity_loss': 0.0,
+        'geometry_loss': 0.0, 
+        'direction_loss': 0.0,
+        'total_hair_loss': 0.0
+    }
+    
+    # Check if we have hair data
+    if not (hasattr(gaussians, '_group_id') and hasattr(gaussians, '_strand_id')):
+        return losses
+        
+    hair_mask = gaussians._group_id != -1
+    if not torch.any(hair_mask):
+        return losses
+    
+    # Opacity continuity loss
+    if hair_params.lambda_opacity > 0:
+        losses['opacity_loss'] = compute_opacity_continuity_loss(gaussians, hair_mask)
+    
+    # Geometry continuity loss  
+    if hair_params.lambda_geometry > 0:
+        losses['geometry_loss'] = compute_geometry_continuity_loss(gaussians, hair_mask)
+        
+    # Direction alignment loss
+    if hair_params.lambda_direction > 0:
+        losses['direction_loss'] = compute_direction_alignment_loss(gaussians, hair_mask)
+    
+    # Compute total weighted loss
+    losses['total_hair_loss'] = (
+        hair_params.lambda_opacity * losses['opacity_loss'] +
+        hair_params.lambda_geometry * losses['geometry_loss'] + 
+        hair_params.lambda_direction * losses['direction_loss']
+    )
+    
+    return losses
+
+
+def compute_opacity_continuity_loss(gaussians, hair_mask):
+    """Compute opacity continuity loss for hair strands"""
+    group_ids = gaussians._group_id[hair_mask].contiguous()
+    opacities = gaussians.get_opacity[hair_mask].contiguous()
+    strand_ids = gaussians._strand_id[hair_mask].contiguous()
+
+    if len(opacities) < 3:
+        return torch.tensor(0.0, device=opacities.device)
+
+    # Stable sorting
+    sort_key = (group_ids << 20) + strand_ids
+    sorted_indices = torch.argsort(sort_key)
+    
+    sorted_opacities = opacities[sorted_indices]
+    sorted_group_ids = group_ids[sorted_indices]
+    sorted_strand_ids = strand_ids[sorted_indices]
+
+    # Compute differences
+    prev_diff = torch.abs(sorted_opacities[1:] - sorted_opacities[:-1])
+    avg_diff = (prev_diff[:-1] + prev_diff[1:]) / 2
+
+    # Continuity check
+    same_group = (sorted_group_ids[:-1] == sorted_group_ids[1:])
+    consecutive = (sorted_strand_ids[1:] - sorted_strand_ids[:-1]) == 1
+    valid_mask = same_group[:-1] & same_group[1:] & consecutive[:-1] & consecutive[1:]
+
+    return torch.mean(avg_diff[valid_mask]) if torch.any(valid_mask) else torch.tensor(0.0, device=opacities.device)
+
+
+def compute_geometry_continuity_loss(gaussians, hair_mask):
+    """Compute geometry continuity loss for hair strands"""
+    if not torch.any(hair_mask):
+        return torch.tensor(0.0, device="cuda")
+    
+    # Get sorted data
+    group_ids = gaussians._group_id[hair_mask].contiguous()
+    scales = gaussians.get_scaling[hair_mask].contiguous()
+    strand_ids = gaussians._strand_id[hair_mask].contiguous()
+    
+    sort_key = (group_ids << 20) + strand_ids
+    sorted_indices = torch.argsort(sort_key)
+    
+    sorted_scales = scales[sorted_indices].contiguous()
+    sorted_group_ids = group_ids[sorted_indices].contiguous()
+    sorted_strand_ids = strand_ids[sorted_indices].contiguous()
+    
+    # Scale continuity loss
+    continuity_loss = compute_scale_continuity_loss(sorted_scales, sorted_group_ids, sorted_strand_ids)
+    
+    # Scale size penalty
+    size_penalty = compute_scale_size_penalty(sorted_scales)
+    
+    total_loss = continuity_loss + 0.5 * size_penalty
+    return torch.clamp(total_loss, min=0.0, max=1.0)
+
+
+def compute_scale_continuity_loss(sorted_scales, sorted_group_ids, sorted_strand_ids):
+    """Compute scale continuity loss within strands"""
+    if len(sorted_scales) < 3:
+        return torch.tensor(0.0, device="cuda")
+    
+    scale_diff = torch.norm(sorted_scales[1:] - sorted_scales[:-1], dim=1)
+    scale_diff = scale_diff / (torch.mean(torch.norm(sorted_scales, dim=1)) + 1e-6)
+    scale_avg_diff = (scale_diff[:-1] + scale_diff[1:]) / 2
+    
+    same_group = (sorted_group_ids[:-1] == sorted_group_ids[1:])
+    consecutive = (sorted_strand_ids[1:] - sorted_strand_ids[:-1]) == 1
+    valid_pairs = same_group & consecutive
+    valid_mask = valid_pairs[:-1] & valid_pairs[1:]
+
+    if torch.any(valid_mask):
+        return torch.mean(scale_avg_diff[valid_mask])
+    return torch.tensor(0.0, device="cuda")
+
+
+def compute_scale_size_penalty(sorted_scales):
+    """Compute penalty for oversized hair Gaussians"""
+    hair_volumes = torch.prod(sorted_scales, dim=1)
+    volume_median = torch.median(hair_volumes)
+    volume_threshold = volume_median * 4.0
+    
+    oversized_mask = hair_volumes > volume_threshold
+    if torch.any(oversized_mask):
+        excess_volumes = hair_volumes[oversized_mask] - volume_threshold
+        return torch.mean(excess_volumes / volume_threshold)
+    return torch.tensor(0.0, device="cuda")
+
+
+def compute_direction_alignment_loss(gaussians, hair_mask):
+    """Compute direction alignment loss between Gaussians and hair tangents"""
+    if not torch.any(hair_mask):
+        return torch.tensor(0.0, device="cuda")
+    
+    # Safe data extraction
+    group_ids = gaussians._group_id[hair_mask].contiguous()
+    xyz = gaussians._xyz[hair_mask].contiguous()
+    rotations = gaussians.get_rotation[hair_mask].contiguous()
+    strand_ids = gaussians._strand_id[hair_mask].contiguous()
+    
+    if len(xyz) < 2:
+        return torch.tensor(0.0, device="cuda")
+    
+    # Stable sorting
+    sort_key = (group_ids << 20) + strand_ids
+    sorted_indices = torch.argsort(sort_key)
+    
+    sorted_xyz = xyz[sorted_indices].contiguous()
+    sorted_rotations = rotations[sorted_indices].contiguous()
+    sorted_group_ids = group_ids[sorted_indices].contiguous()
+    sorted_strand_ids = strand_ids[sorted_indices].contiguous()
+    
+    # Vectorized tangent computation
+    same_strand = (sorted_group_ids[:-1] == sorted_group_ids[1:]) & \
+                ((sorted_strand_ids[1:] - sorted_strand_ids[:-1]) == 1)
+    
+    all_forward_diff = sorted_xyz[1:] - sorted_xyz[:-1]
+    tangent_dirs = torch.zeros_like(sorted_xyz)
+    
+    # Forward difference
+    forward_valid = torch.cat([same_strand, torch.tensor([False], device="cuda")])
+    tangent_dirs[forward_valid] = all_forward_diff[same_strand]
+    
+    # Backward difference
+    backward_valid = torch.cat([torch.tensor([False], device="cuda"), same_strand])
+    backward_only = backward_valid & ~forward_valid
+    if torch.any(backward_only):
+        backward_indices = torch.where(backward_only)[0]
+        tangent_dirs[backward_only] = all_forward_diff[backward_indices - 1].clone()
+    
+    # Center difference
+    both_valid = forward_valid & backward_valid
+    if torch.any(both_valid[1:-1]):
+        center_indices = torch.where(both_valid[1:-1])[0] + 1
+        center_diff = (sorted_xyz[center_indices + 1] - sorted_xyz[center_indices - 1]) / 2.0
+        tangent_dirs[center_indices] = center_diff
+    
+    # Normalize tangents
+    tangent_norms = torch.norm(tangent_dirs, dim=1, keepdim=True)
+    valid_tangents = tangent_norms.squeeze() > 1e-6
+    
+    if not torch.any(valid_tangents):
+        return torch.tensor(0.0, device="cuda")
+    
+    tangent_dirs = tangent_dirs[valid_tangents]
+    tangent_norms = tangent_norms[valid_tangents]
+    normalized_tangents = tangent_dirs / tangent_norms
+    
+    # Extract Gaussian Z-axis
+    from utils.general_utils import build_rotation
+    rotation_matrices = build_rotation(sorted_rotations[valid_tangents])
+    gaussian_z_axes = rotation_matrices[:, :, 2].contiguous()
+    
+    # Compute alignment scores
+    alignment_scores = torch.sum(gaussian_z_axes * normalized_tangents, dim=1)
+    alignment_scores = torch.clamp(alignment_scores, -1.0, 1.0)
+    
+    return torch.mean(1.0 - torch.abs(alignment_scores))
+
+
+def print_training_stats(iteration, loss, Ll1, ssim_value, Ll1depth, gaussians, hair_losses):
+    """Print comprehensive training statistics"""
+    if iteration % 100 != 0:
+        return
+        
+    print(f"[ITER {iteration}] Total Loss: {loss.item():.4f} | " 
+          f"L1: {Ll1.item():.4f} | "
+          f"SSIM: {(1 - ssim_value).item():.4f} | "
+          f"Depth: {Ll1depth:.4f}")
+    
+    if not hasattr(gaussians, '_group_id'):
+        print("No hair gaussians found")
+        return
+        
+    hair_mask = gaussians._group_id != -1
+    hair_count = hair_mask.sum().item() if hair_mask.any() else 0
+    
+    if hair_count > 0:
+        hair_scales = gaussians.get_scaling[hair_mask].detach()
+        hair_volumes = torch.prod(hair_scales, dim=1)
+        max_scales = torch.max(hair_scales, dim=1)[0]
+        
+        print(f"Hair Losses - Opacity: {hair_losses['opacity_loss']:.4f} | "
+              f"Geometry: {hair_losses['geometry_loss']:.4f} | "
+              f"Direction: {hair_losses['direction_loss']:.4f} | "
+              f"Hair Count: {hair_count}")
+        
+        print(f"Hair Stats - Volume: med={torch.median(hair_volumes).item():.2e}, "
+              f"max={torch.max(hair_volumes).item():.2e} | "
+              f"Scale: med={torch.median(max_scales).item():.4f}, "
+              f"max={torch.max(max_scales).item():.4f}")
+
+
+def apply_hair_scale_clamping(gaussians, iteration, hair_params):
+    """Apply real-time scale clamping for oversized hair Gaussians"""
+    if not (hasattr(gaussians, '_group_id') and iteration > 1000):
+        return
+    
+    with torch.no_grad():
+        hair_mask = gaussians._group_id != -1
+        if not torch.any(hair_mask):
+            return
+        
+        hair_scales = gaussians.get_scaling[hair_mask]
+        hair_volumes = torch.prod(hair_scales, dim=1)
+        
+        volume_median = torch.median(hair_volumes)
+        volume_threshold = volume_median * 5.0
+        
+        oversized_mask = hair_volumes > volume_threshold
+        if not torch.any(oversized_mask):
+            return
+        
+        # Create global mask and apply clamping
+        global_oversized_mask = torch.zeros_like(gaussians._group_id, dtype=torch.bool).squeeze()
+        global_oversized_mask[hair_mask] = oversized_mask
+        
+        oversized_real_scales = gaussians.get_scaling[global_oversized_mask]
+        oversized_volumes = torch.prod(oversized_real_scales, dim=1, keepdim=True)
+        scale_factor = torch.pow(volume_threshold / oversized_volumes, 1/3).clamp(max=1.0)
+        
+        new_real_scales = oversized_real_scales * scale_factor
+        gaussians._scaling[global_oversized_mask] = gaussians.scaling_inverse_activation(new_real_scales)
+        
+        if iteration % 500 == 0:
+            print(f"[ITER {iteration}] Clamped {oversized_mask.sum().item()} oversized hair gaussians")
+
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, hair_params):
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, hair_params=hair_params)
+    scene.save(0)
+
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -68,6 +345,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
+    # Set hair position fixing if requested
+    if hair_params.fix_hair_positions:
+        gaussians.set_fix_hair_positions(True)
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -78,7 +359,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 net_image_bytes = None
                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
                 if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
+                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer or 1.0, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                 network_gui.send(net_image_bytes, dataset.source_path)
                 if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
@@ -87,7 +368,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 network_gui.conn = None
 
         iter_start.record()
-
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -115,7 +395,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        # Loss
+        # Loss computation
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         if FUSED_SSIM_AVAILABLE:
@@ -139,8 +419,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-        loss.backward()
+        # Hair-specific losses
+        hair_losses = compute_hair_losses(gaussians, hair_params)
+        loss += hair_losses['total_hair_loss']
 
+        # Print training statistics
+        print_training_stats(iteration, loss, Ll1, ssim_value, Ll1depth, gaussians, hair_losses)
+
+        loss.backward()
         iter_end.record()
 
         with torch.no_grad():
@@ -149,7 +435,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "GS_nums": f"{gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -160,21 +446,35 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # Densification
+            # Densification with hair-aware strategies
             if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                    grads = gaussians.xyz_gradient_accum / gaussians.denom
+                    grads[grads.isnan()] = 0.0
+                    
+                    # Hair-aware densification
+                    if hasattr(gaussians, '_group_id') and hair_params.enable_strand_clone:
+                        if iteration < opt.densify_until_iter:
+                            strand_stats = gaussians.smart_strand_clone(grads, opt.densify_grad_threshold * 0.25, scene.cameras_extent, iteration, hair_params.strand_clone_threshold)
+                            if iteration % 100 == 0 and strand_stats['strands_cloned'] > 0:
+                                print(f"[ITER {iteration}] Strand densification: {strand_stats['strands_cloned']} strands cloned ({strand_stats['points_cloned']} new points)")
+                    
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
+                if hair_params.fix_hair_positions:
+                    gaussians.fix_hair_xyz_gradients()
+
+                # Apply scale clamping
+                apply_hair_scale_clamping(gaussians, iteration, hair_params)
+
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 if use_sparse_adam:
@@ -257,6 +557,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    hp = HairParams(parser)  # Add hair parameters
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -279,7 +580,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, hp.extract(args))
 
     # All done
     print("\nTraining complete.")

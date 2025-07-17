@@ -1,0 +1,69 @@
+{
+  "colmap_path": "/path/to/your/colmap/data",
+  "hair_data": "/path/to/your/hair/data.hair",
+  "output_dir": "/path/to/output",
+  
+  "processing_options": {
+    "min_strand_length": 15,
+    "auto_align": true,
+    "save_visualization": true,
+    "downsample_factor": 1
+  },
+  
+  "alignment": {
+    "target_cloud": "/path/to/target/pointcloud.ply",
+    "transform_config": null
+  },
+  
+  "manual_transform_params": {
+    "description": "Manually adjusted transform parameters (edit these after initial processing)",
+    "scale_factor": 1.0,
+    "translation": [0.0, 0.0, 0.0],
+    "rotation_matrix": [
+      [1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0], 
+      [0.0, 0.0, 1.0]
+    ],
+    "rotation_x": 0.0,
+    "rotation_y": 0.0,
+    "rotation_z": 0.0,
+    "fine_translation": [0.0, 0.0, 0.0]
+  },
+  
+  "examples": {
+    "procrustes_only": {
+      "description": "Use only Procrustes analysis for initial alignment",
+      "auto_align": true,
+      "transform_config": null
+    },
+    
+    "manual_fine_tuning": {
+      "description": "Based on your original workflow - start with auto alignment then manually adjust",
+      "auto_align": true,
+      "manual_adjustments": {
+        "translation_offset": [-0.12, -0.10, 0.21],
+        "rotation_sequence": [
+          {"axis": "y", "angle": 90},
+          {"axis": "x", "angle": 90},
+          {"axis": "z", "angle": 45},
+          {"axis": "x", "angle": -220},
+          {"axis": "y", "angle": -45}
+        ]
+      }
+    },
+    
+    "identity_transform": {
+      "description": "No alignment - use original coordinates",
+      "auto_align": false,
+      "transform_config": null
+    }
+  },
+  
+  "usage_notes": [
+    "1. First run with auto_align=true to get initial alignment",
+    "2. Check visualization files (original_hair.ply, aligned_hair.ply)",
+    "3. If needed, edit transform_params.json and rerun with that config",
+    "4. For fine-tuning, adjust rotation_x/y/z and fine_translation parameters",
+    "5. Use downsample_factor > 1 for faster processing of large datasets"
+  ]
+} 

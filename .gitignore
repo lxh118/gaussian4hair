@@ -1,8 +1,46 @@
+# Python
 *.pyc
-.vscode
-output
-build
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Data directories
+output/
+data/
+Data/
+models/
+checkpoints/
+
+# Logs and results
+*.log
+tensorboard_3d/
+screenshots/
+
+# Build artifacts
 diff_rasterization/diff_rast.egg-info
 diff_rasterization/dist
-tensorboard_3d
-screenshots
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.conda
+*.conda
