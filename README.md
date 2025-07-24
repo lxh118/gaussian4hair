@@ -10,14 +10,25 @@
 - **位置固定**: 可选的头发位置锁定，保持原始几何
 - **自动对齐**: 集成的头发数据与COLMAP点云对齐工具
 
-## 🚀 快速开始
+## �� 快速开始
 
 ### 1. 环境配置
+
+#### 方法一：自动安装（推荐）
 ```bash
 git clone https://github.com/lxh118/gaussian4hair.git
 cd gaussian4hair
+./setup.sh
+```
+
+#### 方法二：手动安装
+```bash
+git clone https://github.com/lxh118/gaussian4hair.git
+cd gaussian4hair
+
+# 创建环境
 conda env create -f environment.yml
-conda activate gaussian4hair
+conda activate gaussian_splatting
 
 # 安装子模块
 pip install submodules/diff-gaussian-rasterization
@@ -35,17 +46,36 @@ python prepare_data.py \
 ```
 
 ### 3. 训练
+
+#### 方法一：使用快速脚本（推荐）
+```bash
+# 激活环境
+conda activate gaussian_splatting
+
+# 使用默认场景jenya2训练
+./run.sh
+
+# 或指定其他场景
+./run.sh [场景名称]
+```
+
+#### 方法二：手动训练
 ```bash
 python train.py \
-    -s /path/to/output/colmap \
-    --hair_data /path/to/output/aligned_hair.hair \
-    --model_path /path/to/model \
+    -s /path/to/scene/data \
+    --hair_data /path/to/hair.hair \
+    -m /path/to/model \
     --hair_init
 ```
 
 ### 4. 渲染
 ```bash
 python render.py -m /path/to/model
+```
+
+### 5. 评估
+```bash
+python metrics.py -m /path/to/model
 ```
 
 ## ⚙️ 主要参数
@@ -71,10 +101,11 @@ python render.py -m /path/to/model
 ## 🛠️ 工具脚本
 
 - `prepare_data.py` - 数据预处理和头发对齐
-- `run.sh` - 一键训练脚本
+- `run.sh` - 一键训练脚本（7000次迭代）
 - `render.py` - 渲染脚本
 - `metrics.py` - 质量评估
 - `remove_ids.py` - 移除PLY文件中的group_id和strand_id属性
+- `setup.sh` - 自动环境配置脚本
 
 ## 🛠️ 高级用法
 
@@ -110,19 +141,32 @@ python prepare_data.py --config my_config.json
 ## 📋 数据格式
 
 **支持的头发数据格式：**
-- `.hair` - MonoHair标准格式
+- `.hair` - MonoHair标准格式（推荐）
 - `.ply` - 点云格式（需要指定发丝结构）
 
 **COLMAP数据要求：**
 - `sparse/` - COLMAP稀疏重建结果
 - `images/` - 输入图像
 
+**推荐的数据目录结构：**
+```
+/home/ubuntu/data/
+├── jenya2/
+│   ├── images/
+│   ├── sparse/
+│   ├── connected_strands_aligned2_downsampled.hair
+│   └── ...
+├── counter/
+└── room/
+```
+
 ## 💻 系统要求
 
-- Python 3.8+
-- CUDA 11.3+
-- GPU内存 > 8GB (推荐)
-- PyTorch 1.12+
+- **Python**: 3.10+ (推荐 3.10.12)
+- **CUDA**: 12.1+ (支持 11.8+)
+- **PyTorch**: 2.0+ (推荐 2.5.1+)
+- **GPU内存**: > 8GB (推荐 16GB+)
+- **系统内存**: > 16GB
 
 ## 🔧 故障排除
 
@@ -139,6 +183,14 @@ python prepare_data.py --config my_config.json
 3. **训练不收敛**
    - 确保 `--fix_hair_positions` 开启
    - 检查头发数据质量和对齐
+
+4. **环境安装问题**
+   - 重新运行 `./setup.sh`
+   - 检查CUDA和驱动版本兼容性
+
+5. **子模块编译失败**
+   - 确保CUDA环境正确配置
+   - 尝试重新编译：`pip install --force-reinstall submodules/[模块名]`
 
 ## 🙏 致谢
 
@@ -159,4 +211,39 @@ python prepare_data.py --config my_config.json
   journal={arXiv preprint},
   year={2025}
 }
+```
+
+## ✅ 当前状态
+
+1. **环境配置已更新** - 使用`gaussian_splatting`环境名称
+2. **版本要求现代化** - 支持最新的PyTorch 2.5.1和CUDA 12.1
+3. **自动化脚本完善** - `setup.sh`和`run.sh`提供一键操作
+4. **数据管理优化** - `.gitignore`确保大文件不被上传
+
+## 📁 已忽略的数据目录
+
+`.gitignore`中包含了：
+```
+# Data directories
+output/
+data/
+Data/
+models/
+checkpoints/
+```
+
+这意味着所有训练数据和输出都不会被git追踪，保持仓库轻量。
+
+## 🚀 快速验证
+
+验证环境是否正确配置：
+```bash
+# 激活环境
+conda activate gaussian_splatting
+
+# 检查依赖
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+
+# 快速测试（可选）
+python train.py --help
 ```
