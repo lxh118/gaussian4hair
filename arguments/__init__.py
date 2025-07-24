@@ -84,10 +84,10 @@ class HairParams(ParamGroup):
         self.hair_init_style = "cylinder"  # "cylinder" or "ellipsoid"
         
         # Hair filtering parameters  
-        self.min_strand_points = 20  # Minimum points per strand to keep (原始版本使用20)
+        self.min_strand_points = 20  # Minimum points per strand to keep
         self.hair_body_threshold = 0.1  # Distance threshold for removing body points near hair
         
-        # Hair regularization weights (恢复原始版本的权重)
+        # Hair regularization weights
         self.lambda_opacity = 1.0  # Weight for opacity continuity loss
         self.lambda_geometry = 1.0  # Weight for geometry continuity loss
         self.lambda_direction = 0.1  # Weight for direction alignment loss
