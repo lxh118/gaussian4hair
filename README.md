@@ -10,7 +10,7 @@
 - **位置固定**: 可选的头发位置锁定，保持原始几何
 - **自动对齐**: 集成的头发数据与COLMAP点云对齐工具
 
-## �� 快速开始
+## 🚀 快速开始
 
 ### 1. 环境配置
 
@@ -114,10 +114,10 @@ python metrics.py -m /path/to/model
 # 生成初始对齐
 python prepare_data.py --colmap_path /data --hair_data /hair.hair --output_dir /out
 
-# 编辑对齐参数
-vim /out/transform_params.json
+# 如果生成了对齐参数文件，可以手动调整
+# vim /out/transform_params.json
 
-# 重新应用调整
+# 重新应用调整（如果有配置文件）
 python prepare_data.py --transform_config /out/transform_params.json \
     --colmap_path /data --hair_data /hair.hair --output_dir /out
 ```
@@ -135,8 +135,6 @@ cp configs/alignment_config.json my_config.json
 # 编辑配置
 python prepare_data.py --config my_config.json
 ```
-
-详细的对齐工具使用方法请参考 [`docs/hair_alignment_guide.md`](docs/hair_alignment_guide.md)
 
 ## 📋 数据格式
 
@@ -156,8 +154,8 @@ python prepare_data.py --config my_config.json
 │   ├── sparse/
 │   ├── connected_strands_aligned2_downsampled.hair
 │   └── ...
-├── counter/
-└── room/
+├── white_curly1/
+└── ...
 ```
 
 ## 💻 系统要求
@@ -173,8 +171,8 @@ python prepare_data.py --config my_config.json
 **常见问题：**
 
 1. **头发对齐不准确**
-   - 检查 `aligned_hair.ply` 可视化结果
-   - 手动调整 `transform_params.json` 中的参数
+   - 检查prepare_data.py的输出结果
+   - 手动调整数据预处理参数
 
 2. **训练内存不足**
    - 使用 `--downsample` 参数减少头发数据
@@ -207,32 +205,18 @@ python prepare_data.py --config my_config.json
 ```bibtex
 @article{gaussian4hair2025,
   title={Gaussian4Hair: Hair-Aware 3D Gaussian Splatting for High-Fidelity Hair Rendering},
-  author={Your Name},
+  author={Xinghua Lou},
   journal={arXiv preprint},
   year={2025}
 }
 ```
 
-## ✅ 当前状态
+## ✅ 项目特色
 
-1. **环境配置已更新** - 使用`gaussian_splatting`环境名称
-2. **版本要求现代化** - 支持最新的PyTorch 2.5.1和CUDA 12.1
-3. **自动化脚本完善** - `setup.sh`和`run.sh`提供一键操作
-4. **数据管理优化** - `.gitignore`确保大文件不被上传
-
-## 📁 已忽略的数据目录
-
-`.gitignore`中包含了：
-```
-# Data directories
-output/
-data/
-Data/
-models/
-checkpoints/
-```
-
-这意味着所有训练数据和输出都不会被git追踪，保持仓库轻量。
+1. **环境配置现代化** - 支持最新PyTorch和CUDA版本
+2. **自动化工作流程** - 一键安装和训练脚本
+3. **头发专用优化** - 针对头发渲染的特殊处理
+4. **完整的工具链** - 从数据预处理到质量评估
 
 ## 🚀 快速验证
 
@@ -244,6 +228,6 @@ conda activate gaussian_splatting
 # 检查依赖
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 
-# 快速测试（可选）
+# 快速测试
 python train.py --help
 ```
