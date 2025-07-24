@@ -1536,13 +1536,20 @@ class GaussianModel:
         strands_cloned = len(unique_groups)
         new_group_ids_list = new_group_ids_for_unique.tolist()
         
+        # 辅助函数：格式化长列表显示
+        def format_list_display(lst, max_items=20):
+            if len(lst) <= max_items:
+                return str(lst)
+            else:
+                return f"[{', '.join(map(str, lst[:max_items//2]))}, ... ({len(lst)-max_items} more), {', '.join(map(str, lst[-max_items//2:]))}]"
+        
         # 打印详细的克隆信息
         print(f"[ITER {iteration}] STRAND CLONE COMPLETED:")
-        print(f"  - Original strand IDs: {unique_groups.tolist()}")
-        print(f"  - New strand IDs: {new_group_ids_list}")
+        print(f"  - Original strand IDs: {format_list_display(unique_groups.tolist())}")
+        print(f"  - New strand IDs: {format_list_display(new_group_ids_list)}")
         print(f"  - Strands cloned: {strands_cloned}")
         print(f"  - Points cloned: {points_cloned}")
-        print(f"  - Points per strand: {[int(group_counts[i].item()) for i in range(len(group_counts))]}")
+        print(f"  - Points per strand: {format_list_display([int(group_counts[i].item()) for i in range(len(group_counts))])}")
         
         # 返回统计信息
         return {
