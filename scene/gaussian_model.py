@@ -699,9 +699,14 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
-        # 添加group_id和strand_id数据
-        group_id = self._group_id.detach().cpu().numpy().astype(np.int32)
-        strand_id = self._strand_id.detach().cpu().numpy().astype(np.int32)
+        # 检查并处理group_id和strand_id数据
+        if self._group_id.numel() > 0 and self._group_id.shape[0] == xyz.shape[0]:
+            group_id = self._group_id.detach().cpu().numpy().astype(np.int32)
+            strand_id = self._strand_id.detach().cpu().numpy().astype(np.int32)
+        else:
+            # 如果没有头发数据，使用默认值-1
+            group_id = np.full((xyz.shape[0],), -1, dtype=np.int32)
+            strand_id = np.full((xyz.shape[0],), -1, dtype=np.int32)
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
@@ -710,8 +715,8 @@ class GaussianModel:
         dtype_full[-1] = ('strand_id', 'i4')  # int32
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        # attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-
+        
+        # 始终包含group_id和strand_id，但在没有头发数据时使用-1
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, 
                             group_id.reshape(-1, 1), strand_id.reshape(-1, 1)), axis=1)
       
@@ -730,19 +735,26 @@ class GaussianModel:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         # 准备基础数据
-        group_ids = self._group_id.cpu().numpy()
         xyz = self._xyz.detach().cpu().numpy().astype(np.float32)
-        valid_mask = group_ids >= 0
         
-        # 生成颜色映射
-        unique_groups = np.unique(group_ids[valid_mask])
-        color_map = {g: np.random.randint(0, 256, 3, dtype=np.uint8) for g in unique_groups}
-        
-        # 生成颜色数组
-        colors = np.full((len(group_ids), 3), 128, dtype=np.uint8)  # 背景点默认灰色
-        for idx, gid in enumerate(group_ids):
-            if gid in color_map:
-                colors[idx] = color_map[gid]
+        # 检查是否有头发数据
+        if self._group_id.numel() > 0 and self._group_id.shape[0] == xyz.shape[0]:
+            group_ids = self._group_id.cpu().numpy()
+            valid_mask = group_ids >= 0
+            
+            # 生成颜色映射
+            unique_groups = np.unique(group_ids[valid_mask])
+            color_map = {g: np.random.randint(0, 256, 3, dtype=np.uint8) for g in unique_groups}
+            
+            # 生成颜色数组
+            colors = np.full((len(group_ids), 3), 128, dtype=np.uint8)  # 背景点默认灰色
+            for idx, gid in enumerate(group_ids):
+                if gid in color_map:
+                    colors[idx] = color_map[gid]
+        else:
+            # 没有头发数据时，所有点都使用默认灰色
+            colors = np.full((xyz.shape[0], 3), 128, dtype=np.uint8)
+            valid_mask = np.zeros(xyz.shape[0], dtype=bool)  # 没有有效的头发点
 
         # 构建PLY元素的通用函数
         def create_ply_element(vertices, vertex_colors):
